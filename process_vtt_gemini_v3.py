@@ -85,6 +85,34 @@ def vtt_time_to_srt_time(vtt_time):
     return vtt_time.replace('.', ',')
 
 
+def ask_remove_speaker_names():
+    """発話者名を除去するか確認"""
+    print("\n" + "-" * 40)
+    print("発話者名（例: minamidate:, Asano:）の処理:")
+    print("  1. 除去する")
+    print("  2. そのまま残す")
+    print("-" * 40)
+
+    while True:
+        choice = input("選択してください [1/2]: ").strip()
+        if choice == "1":
+            print("→ 発話者名を除去します\n")
+            return True
+        elif choice == "2":
+            print("→ 発話者名を残します\n")
+            return False
+        else:
+            print("1 または 2 を入力してください")
+
+
+def remove_speaker_name(text):
+    """テキストから発話者名を除去"""
+    # パターン: "名前:" または "名前 名前:" の形式
+    # 例: "minamidate:", "Kotaro Arita:", "Asano:"
+    pattern = r'^[A-Za-z\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]+(?:\s+[A-Za-z\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]+)*:\s*'
+    return re.sub(pattern, '', text)
+
+
 def apply_simple_replacements(text, patterns):
     """単純な置換パターンを適用"""
     simple = patterns.get("simple_patterns", {})
@@ -333,12 +361,16 @@ def process_entries(entries, client, patterns):
     return all_corrected
 
 
-def write_srt_file(entries, corrected_texts, output_path):
+def write_srt_file(entries, corrected_texts, output_path, remove_speaker=False):
     """校正済みテキストをSRTファイルに書き出し"""
     with open(output_path, 'w', encoding='utf-8') as f:
         for entry in entries:
             idx = entry['index']
             text = corrected_texts.get(idx, entry['text'])
+
+            # 発話者名の除去
+            if remove_speaker:
+                text = remove_speaker_name(text)
 
             f.write(f"{idx}\n")
             f.write(f"{vtt_time_to_srt_time(entry['start'])} --> {vtt_time_to_srt_time(entry['end'])}\n")
@@ -389,6 +421,9 @@ def main():
 
     print(f"\n入力ファイル: {vtt_file.name}")
 
+    # 発話者名の除去オプションを確認
+    remove_speaker = ask_remove_speaker_names()
+
     # タイムスタンプでフォルダ名を生成
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     work_folder_name = f"work_{timestamp}"
@@ -409,7 +444,7 @@ def main():
 
     # 最終ファイルの出力
     final_output_path = work_folder / "final_output_corrected.srt"
-    write_srt_file(entries, corrected_texts, final_output_path)
+    write_srt_file(entries, corrected_texts, final_output_path, remove_speaker)
 
     print("\n" + "=" * 60)
     print("処理完了!")
