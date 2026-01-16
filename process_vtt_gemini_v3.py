@@ -21,6 +21,7 @@ import sys
 import re
 import json
 import time
+import threading
 from datetime import datetime
 from pathlib import Path
 import shutil
@@ -43,6 +44,44 @@ CONFIG = {
     "sleep_between_chunks": 1,  # チャンク間の待機秒数
     "enable_two_pass": True,    # 2パス処理を有効化
 }
+
+
+class Spinner:
+    """処理中を示すスピナー"""
+    def __init__(self, message="処理中"):
+        self.message = message
+        self.running = False
+        self.thread = None
+        self.start_time = None
+
+    def _spin(self):
+        chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        idx = 0
+        while self.running:
+            elapsed = time.time() - self.start_time
+            sys.stdout.write(f"\r  {chars[idx]} {self.message}... ({elapsed:.0f}秒経過)")
+            sys.stdout.flush()
+            idx = (idx + 1) % len(chars)
+            time.sleep(0.1)
+
+    def start(self):
+        self.running = True
+        self.start_time = time.time()
+        self.thread = threading.Thread(target=self._spin)
+        self.thread.start()
+
+    def stop(self, success=True):
+        self.running = False
+        if self.thread:
+            self.thread.join()
+        elapsed = time.time() - self.start_time
+        # 行をクリア
+        sys.stdout.write("\r" + " " * 60 + "\r")
+        sys.stdout.flush()
+        if success:
+            print(f"  ✓ {self.message} 完了 ({elapsed:.1f}秒)")
+        else:
+            print(f"  ✗ {self.message} 失敗 ({elapsed:.1f}秒)")
 
 
 def load_correction_patterns():
@@ -255,8 +294,10 @@ def parse_ai_response(response_text, original_entries):
     return result
 
 
-def call_gemini_api(client, prompt, pass_num=1):
+def call_gemini_api(client, prompt, pass_num=1, chunk_info=""):
     """Gemini APIを呼び出し"""
+    spinner = Spinner(f"API呼び出し中 {chunk_info}")
+    spinner.start()
     try:
         response = client.chat.completions.create(
             model=CONFIG["model"],
@@ -264,9 +305,15 @@ def call_gemini_api(client, prompt, pass_num=1):
                 {"role": "user", "content": prompt}
             ]
         )
+        spinner.stop(success=True)
         return response.choices[0].message.content
     except Exception as e:
-        print(f"    [ERROR] パス{pass_num} API呼び出しエラー: {e}")
+        spinner.stop(success=False)
+        print(f"\n  ╔══════════════════════════════════════════════════╗")
+        print(f"  ║  ERROR: API呼び出しエラー                        ║")
+        print(f"  ╠══════════════════════════════════════════════════╣")
+        print(f"  ║  {str(e)[:48]:<48} ║")
+        print(f"  ╚══════════════════════════════════════════════════╝\n")
         return None
 
 
@@ -290,23 +337,32 @@ def process_entries(entries, client, patterns):
     context_window = CONFIG["context_window"]
     total_entries = len(entries)
     total_chunks = (total_entries + chunk_size - 1) // chunk_size
+    total_api_calls = total_chunks * (2 if CONFIG["enable_two_pass"] else 1)
 
-    print(f"\n処理開始: 総エントリ数 {total_entries}, チャンクサイズ {chunk_size}")
-    print(f"総チャンク数: {total_chunks}")
-    print(f"使用モデル: {CONFIG['model']}")
-    print(f"2パス処理: {'有効' if CONFIG['enable_two_pass'] else '無効'}")
-    print("-" * 50)
+    print(f"\n┌─────────────────────────────────────────────────┐")
+    print(f"│  処理設定                                       │")
+    print(f"├─────────────────────────────────────────────────┤")
+    print(f"│  総エントリ数: {total_entries:<5}                           │")
+    print(f"│  チャンク数:   {total_chunks:<5} (各{chunk_size}エントリ)            │")
+    print(f"│  API呼び出し: {total_api_calls:<5} 回予定                     │")
+    print(f"│  モデル:      {CONFIG['model']:<20}       │")
+    print(f"└─────────────────────────────────────────────────┘")
 
     all_corrected = {}
+    process_start = time.time()
 
     # === パス1: 基本校正 ===
-    print("\n【パス1】基本校正...")
+    print("\n" + "=" * 50)
+    print("【パス1/2】基本校正")
+    print("=" * 50)
+
     for chunk_num in range(1, total_chunks + 1):
         start_idx = (chunk_num - 1) * chunk_size
         end_idx = min(start_idx + chunk_size, total_entries)
         chunk_entries = entries[start_idx:end_idx]
 
-        print(f"\n[パス1 チャンク {chunk_num}/{total_chunks}] エントリ {start_idx + 1}-{end_idx}")
+        progress = (chunk_num / total_chunks) * 100
+        print(f"\n▶ チャンク {chunk_num}/{total_chunks} (エントリ {start_idx + 1}-{end_idx}) [{progress:.0f}%]")
 
         # 前後文脈を取得
         context_before, context_after = get_context_text(entries, start_idx, end_idx, context_window)
@@ -315,13 +371,14 @@ def process_entries(entries, client, patterns):
         prompt = build_prompt_pass1(chunk_entries, patterns, context_before, context_after)
 
         # API呼び出し
-        response_text = call_gemini_api(client, prompt, pass_num=1)
+        chunk_info = f"[パス1 {chunk_num}/{total_chunks}]"
+        response_text = call_gemini_api(client, prompt, pass_num=1, chunk_info=chunk_info)
 
         if response_text:
             corrected = parse_ai_response(response_text, chunk_entries)
             all_corrected.update(corrected)
-            print(f"  [OK] {len(corrected)} エントリを校正完了")
         else:
+            print("  ⚠ フォールバック: 元テキストを使用")
             for entry in chunk_entries:
                 all_corrected[entry['index']] = entry['text']
 
@@ -330,7 +387,9 @@ def process_entries(entries, client, patterns):
 
     # === パス2: 専門用語チェック ===
     if CONFIG["enable_two_pass"]:
-        print("\n【パス2】専門用語チェック...")
+        print("\n" + "=" * 50)
+        print("【パス2/2】専門用語チェック")
+        print("=" * 50)
 
         # パス1の結果をエントリ形式に変換
         pass1_entries = [{'index': idx, 'text': text} for idx, text in sorted(all_corrected.items())]
@@ -340,23 +399,29 @@ def process_entries(entries, client, patterns):
             end_idx = min(start_idx + chunk_size, len(pass1_entries))
             chunk_entries = pass1_entries[start_idx:end_idx]
 
-            print(f"\n[パス2 チャンク {chunk_num}/{total_chunks}] エントリ {start_idx + 1}-{end_idx}")
+            progress = (chunk_num / total_chunks) * 100
+            print(f"\n▶ チャンク {chunk_num}/{total_chunks} (エントリ {start_idx + 1}-{end_idx}) [{progress:.0f}%]")
 
             prompt = build_prompt_pass2(chunk_entries, patterns)
-            response_text = call_gemini_api(client, prompt, pass_num=2)
+            chunk_info = f"[パス2 {chunk_num}/{total_chunks}]"
+            response_text = call_gemini_api(client, prompt, pass_num=2, chunk_info=chunk_info)
 
             if response_text:
                 corrected = parse_ai_response(response_text, chunk_entries)
                 all_corrected.update(corrected)
-                print(f"  [OK] {len(corrected)} エントリをチェック完了")
 
             if chunk_num < total_chunks:
                 time.sleep(CONFIG["sleep_between_chunks"])
 
     # === 後処理: 辞書置換 ===
-    print("\n【後処理】辞書置換...")
+    print("\n" + "-" * 50)
+    print("【後処理】辞書置換を適用中...")
     for idx in all_corrected:
         all_corrected[idx] = apply_simple_replacements(all_corrected[idx], patterns)
+    print("  ✓ 辞書置換 完了")
+
+    total_time = time.time() - process_start
+    print(f"\n  総処理時間: {total_time:.1f}秒")
 
     return all_corrected
 
