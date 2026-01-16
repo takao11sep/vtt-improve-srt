@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Work folders (processed output)
+work_*/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
